@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.db
+*.log
+logs/
+data/
+*.gguf
+.DS_Store
+.env
+*.egg-info/
+dist/
+build/
+.hermes/
+pids/
+bonsai_fund_data/
