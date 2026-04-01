@@ -1,0 +1,126 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install pyyaml cryptography --quiet
+
+      - name: Smoke test — imports
+        run: |
+          python3 -c "
+            import sys
+            sys.path.insert(0, '.')
+            from bonsai_fund.agent import Market, SYSTEM_PROMPTS, PORT_BASE
+            from bonsai_fund.portfolio import Portfolio
+            from bonsai_fund.risk import RiskEngine, RiskLimits
+            from bonsai_fund.reporter import Reporter
+            from bonsai_fund.hedge_fund import Signal, analyze, sample_markets
+            from bonsai_fund.scheduler import State
+            assert len(SYSTEM_PROMPTS) == 7
+            assert PORT_BASE == 8090
+            print('All imports OK — 7 agents, all modules')
+          "
+
+      - name: Smoke test — portfolio operations
+        run: |
+          python3 -c "
+            import sys, os
+            os.environ['HERMES_HOME'] = '/tmp/hermes_test'
+            sys.path.insert(0, '.')
+            from bonsai_fund.portfolio import Portfolio
+            from bonsai_fund.risk import RiskEngine, RiskLimits
+            p = Portfolio()
+            p.open_position('TEST-26', 'YES', 10, 55.0)
+            p.mark_to_market('TEST-26', 'YES', 62.0)
+            p.close_position('TEST-26', 'YES', 10, 62.0, 0.70)
+            assert p.bankroll > 50.0, 'Trade should be profitable'
+            r = RiskEngine(p, RiskLimits())
+            assert not r.is_circuit_breaker
+            approved, grade, _ = r.assess_signal(4, 1, 2, 0.68, 0.08, 0.55, 'TEST-26')
+            assert approved == True
+            assert grade == 'BUY'
+            print('Portfolio + RiskEngine: OK')
+          "
+
+      - name: Smoke test — signal analysis
+        run: |
+          python3 -c "
+            import sys, os
+            os.environ['HERMES_HOME'] = '/tmp/hermes_test'
+            sys.path.insert(0, '.')
+            from bonsai_fund.agent import Market, AgentVote
+            from bonsai_fund.portfolio import Portfolio
+            from bonsai_fund.risk import RiskEngine, RiskLimits
+            from bonsai_fund.hedge_fund import analyze, sample_markets
+            markets = sample_markets()
+            assert len(markets) == 10
+            p = Portfolio(); r = RiskEngine(p, RiskLimits())
+            votes = [
+              AgentVote(0,'FastIntuit','TEST-26','YES',0.75,0.08,'gut',800),
+              AgentVote(1,'DeepAnalyst','TEST-26','YES',0.70,0.12,'tree',2000),
+              AgentVote(2,'BayesianUpdater','TEST-26','YES',0.65,0.10,'bayes',1500),
+              AgentVote(3,'Contrarian','TEST-26','NO',0.60,-0.15,'crowd',1200),
+              AgentVote(4,'MacroIntegrator','TEST-26','YES',0.55,0.06,'macro',1800),
+              AgentVote(5,'ForensicReader','TEST-26','PASS',0.35,0.00,'no_anomaly',1000),
+              AgentVote(6,'FinalVote','TEST-26','YES',0.68,0.09,'synth',2500),
+            ]
+            sig = analyze(markets[0], votes, p, r)
+            assert sig.approved == True
+            assert sig.majority == 'YES'
+            assert sig.grade in ('BUY', 'STRONG_BUY')
+            print(f'Signal: {sig.grade} — {sig.majority} x{sig.contracts} @ {sig.yes_cents}c')
+          "
+
+      - name: Smoke test — Board Report
+        run: |
+          python3 -c "
+            import sys, os
+            os.environ['HERMES_HOME'] = '/tmp/hermes_test'
+            sys.path.insert(0, '.')
+            from bonsai_fund.portfolio import Portfolio
+            from bonsai_fund.risk import RiskEngine, RiskLimits
+            from bonsai_fund.reporter import Reporter
+            p = Portfolio(); r = RiskEngine(p, RiskLimits())
+            rep = Reporter(p, r)
+            br = rep.generate_board_report(days=7)
+            text = rep.format_telegram_board_report(br)
+            assert len(text) > 100
+            assert 'BOARD REPORT' in text
+            print('Board Report: OK —', len(text), 'chars')
+          "
+
+      - name: Smoke test — strategy plugins
+        run: |
+          python3 -c "
+            import sys, os
+            os.environ['HERMES_HOME'] = '/tmp/hermes_test'
+            sys.path.insert(0, '.')
+            from bonsai_fund.hedge_fund import sample_markets
+            from examples.strategies.momentum import generate_signal as mom
+            from examples.strategies.mean_reversion import generate_signal as mr
+            m = sample_markets()[0]
+            mom_sig = mom(m)
+            mr_sig = mr(m)
+            assert mom_sig.strategy == 'MomentumTrader'
+            assert mr_sig.strategy == 'MeanReversion'
+            assert mom_sig.vote in ('YES', 'NO', 'PASS')
+            assert mr_sig.vote in ('YES', 'NO', 'PASS')
+            print(f'Strategies: Momentum={mom_sig.vote} conf={mom_sig.confidence:.2f} | MeanRev={mr_sig.vote} conf={mr_sig.confidence:.2f}')
+          "
