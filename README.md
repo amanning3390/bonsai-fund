@@ -1,35 +1,71 @@
 # Bonsai Fund
 
-> An open-source quantitative hedge fund powered by a swarm of 7 specialized LLM agents.
+> An open-source quantitative hedge fund powered by a swarm of 7 specialized LLM agents,
+> with **recursive self-learning** that compounds knowledge across three time scales.
 > Dedicated to the Hermes Agent community — built by The Firm, shared with the world.
 
 ```ascii
-┌─────────────────────────────────────────────────────────────┐
-│                    BONSAI HEDGE FUND                        │
+┌─────────────────────────────────────────────────────────────────┐
+│                    BONSAI HEDGE FUND                             │
+│                   Recursive Self-Learning                        │
 │                                                             │
-│   ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐   │
-│   │ Fast │ │ Deep │ │Baye- │ │Con-  │ │Macro │ │Foren-│   │
-│   │Intuit│ │Analyst│ │sian │ │trarian│ │Integr│ │sic  │   │
-│   │  0   │ │  1   │ │  2   │ │  3   │ │  4   │ │  5   │   │
-│   └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘   │
-│      └────────┴────────┴────────┴────────┴────────┘        │
-│                           ↓                                │
-│                    ┌──────────────┐                         │
-│                    │  FinalVote   │                         │
-│                    │  (Synthesize) │                        │
-│                    └──────┬───────┘                         │
-│                           ↓                                 │
-│              ┌────────────┼────────────┐                     │
-│              ↓            ↓            ↓                   │
-│         Portfolio    RiskEngine    Reporter                   │
-│         (SQLite)     (Kelly+CB)   (Telegram)               │
-└─────────────────────────────────────────────────────────────┘
+│  SHORT-TERM (every scan)         MEDIUM-TERM (resolution)     │
+│  ┌──────────────────┐            ┌──────────────────────┐     │
+│  │  AgentMemory     │            │  OutcomeTracker      │     │
+│  │  Vote history    │──────────▶ │  Category base rates │     │
+│  │  Context weights │  tag by   │  Agent affinities    │     │
+│  │  (category,      │  category │                      │     │
+│  │   price, horizon) │            │  MarketClassifier    │     │
+│  └──────────────────┘            │  (analogical priors) │     │
+│            │                       └──────────┬─────────┘     │
+│            ▼                                   │               │
+│  ┌──────────────────┐                          │               │
+│  │ Weighted votes   │                          │               │
+│  │ boost strong     │◀─────────────────────────┘               │
+│  │ agents per       │   LONG-TERM (every 100+ trades)          │
+│  │ context          │   ┌──────────────────────────────────┐  │
+│  └──────────────────┘   │  EvolutionaryMutator              │  │
+│                          │  • Score all prompt variants     │  │
+│                          │  • Keep top 2 as champions        │  │
+│                          │  • Mutate: strengthen_bayesian,   │  │
+│                          │    strengthen_contrarian, etc.    │  │
+│                          │  • Lineage tracking (hash chain) │  │
+│                          └──────────────┬───────────────────┘  │
+│                                         ▼                       │
+│   ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐ ┌──────┐     │
+│   │ Fast │ │ Deep │ │Baye- │ │Con-  │ │Macro │ │Foren-│     │
+│   │Intuit│ │Analyst│ │sian │ │trarian│ │Integr│ │sic  │     │
+│   │  0   │ │  1   │ │  2   │ │  3   │ │  4   │ │  5   │     │
+│   └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘ └──┬───┘     │
+│      └────────┴────────┴────────┴────────┴────────┘           │
+│                           ↓                                    │
+│                    ┌──────────────┐                             │
+│                    │  FinalVote   │                             │
+│                    │  (Synthesize)│                             │
+│                    └──────┬───────┘                             │
+│                           ↓                                      │
+│              ┌────────────┼────────────┐                        │
+│              ↓            ↓            ↓                        │
+│         Portfolio    RiskEngine    Reporter                      │
+│         (SQLite)     (Kelly+CB)   (Telegram)                  │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ## What it does
 
 Bonsai Fund runs a **swarm of 7 specialized LLM agents** as a collective intelligence to
-trade prediction markets (Kalshi). Each agent has a distinct cognitive style:
+trade prediction markets (Kalshi). Each agent has a distinct cognitive style.
+
+**Recursive self-learning**: The swarm gets smarter over time across three time scales:
+
+- **Short-term** (every scan): Context-sensitive weighting — agents that have been accurate
+  in similar markets (same category, price range, time horizon) get up to 2x their vote weight
+- **Medium-term** (every resolution): Category base rates refine, agent affinities update,
+  and the market classifier uses analogical reasoning to bootstrap new categories
+- **Long-term** (every 100+ trades): The EvolutionaryMutator runs a full generation cycle —
+  scoring, selecting champions, and guided-mutating system prompts to create smarter variants
+
+**The swarm learns like a fund manager**: Every trade is a lesson. The edge compounds.
 
 | # | Agent | Style | Best At |
 |---|-------|-------|---------|

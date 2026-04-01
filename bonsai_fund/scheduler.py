@@ -113,7 +113,14 @@ class State:
 # Cycle
 # ---------------------------------------------------------------------------
 
-def run_scan(state: State):
+def run_scan(state: State, learning=None):
+    """
+    Run a full market scan cycle, optionally with recursive self-learning.
+    learning: LearningOrchestrator — enables evolved prompts + context-sensitive voting.
+    """
+    from bonsai_fund.self_learning.orchestrator import LearningOrchestrator
+    learning = learning or LearningOrchestrator()
+
     portfolio = Portfolio()
     risk      = RiskEngine(portfolio, RiskLimits())
     reporter  = Reporter(portfolio, risk)
@@ -131,12 +138,28 @@ def run_scan(state: State):
     if len(markets) <= 1:
         markets = sample_markets()
 
-    state.log(f"Scanning {len(markets)} markets...")
-    signals, approved = [], 0
+    state.log(f"Scanning {len(markets)} markets with 7-agent swarm...")
+
+    # Show learning generation if active
+    if learning:
+        total = learning.outcome_tracker.get_total_edge_analysis()
+        state.log(f"  🧠 Learning Gen {learning.evolver._generation} | "
+                  f"{total['total_trades']} trades | avg_edge={total['avg_edge']:+.4f}")
+
+    signals, approved, all_votes = [], 0, []
 
     for mkt in markets:
-        votes = collect_votes(mkt)
-        sig   = analyze(mkt, votes, portfolio, risk)
+        # Collect votes with evolved prompts (if learning is active)
+        votes = collect_votes(mkt, learning=learning)
+        all_votes.append(votes)
+
+        # Apply context-sensitive weights (if learning has data)
+        if learning:
+            weighted = learning.get_weighted_votes(votes, mkt, mkt.days_to_event)
+            sig = analyze(mkt, votes, portfolio, risk, weighted_votes=weighted)
+        else:
+            sig = analyze(mkt, votes, portfolio, risk)
+
         signals.append(sig)
         if sig.approved:
             approved += 1
@@ -150,6 +173,10 @@ def run_scan(state: State):
                 msg = (f"{emoji} Bonsai Signal\n{sig.ticker}: {side} x{sig.contracts} @ {price:.0f}¢\n"
                        f"Edge: {edge_pct:+.0%}  Conf: {sig.avg_conf:.0%}  Grade: {sig.grade}")
                 send_telegram(msg)
+
+    # SHORT-TERM LEARNING: record all votes for context-sensitive weighting
+    if learning and all_votes:
+        learning.record_scan_votes(markets, all_votes, portfolio)
 
     portfolio.record_equity()
     state.last_scan_at = datetime.now(timezone.utc).isoformat()
@@ -181,7 +208,9 @@ def run_board_report(state: State):
 # Daemon
 # ---------------------------------------------------------------------------
 
-def daemon_loop(state: State, stop: Event):
+def daemon_loop(state: State, stop: Event, learning=None):
+    from bonsai_fund.self_learning.orchestrator import LearningOrchestrator
+    learning = learning or LearningOrchestrator()
     scan_int = _cfg("scan_interval_min", 30)
     state.log(f"Daemon started PID={os.getpid()} interval={scan_int}min")
     data_dir = Path(_cfg("data_dir", str(Path.home() / ".hermes" / "bonsai_fund_data")))
@@ -219,12 +248,26 @@ if __name__ == "__main__":
     run_p = sub.add_parser("run")
     run_p.add_argument("--daemon", action="store_true")
 
+    res_p = sub.add_parser("resolve")
+    res_p.add_argument("ticker")
+    res_p.add_argument("resolution")
+
+    learn_p = sub.add_parser("learn")
+    learn_p.add_argument("--status", action="store_true")
+    learn_p.add_argument("--evolve", action="store_true")
+
     args = parser.parse_args()
     state = State.load()
 
+    # Learning orchestrator is shared across all commands
+    learning = None
+    if getattr(args, "cmd", None) in ("once", "run", "resolve", "learn"):
+        from bonsai_fund.self_learning.orchestrator import LearningOrchestrator
+        learning = LearningOrchestrator()
+
     if args.cmd == "once":
         state.log("=== Manual scan ===")
-        run_scan(state)
+        run_scan(state, learning=learning)
 
     elif args.cmd == "board-report":
         state.log("=== Manual Board Report ===")
@@ -244,15 +287,38 @@ CB tripped:      {state.cb_tripped_at or 'never'}
         p = Portfolio(); r = RiskEngine(p, RiskLimits()); st = r.status()
         print(f"FUND: Bankroll=${st['bankroll']:.4f} DD={st['drawdown_pct']:.1f}% CB={'TRIPPED' if st['circuit_breaker'] else 'clear'}")
 
+    elif args.cmd == "resolve":
+        ticker = args.ticker.upper()
+        resolution = args.resolution.upper()
+        markets = sample_markets()
+        mkt = next((m for m in markets if m.ticker == ticker), None)
+        if not mkt:
+            print(f"Unknown ticker: {ticker}")
+            sys.exit(1)
+        result = learning.process_resolution(ticker, resolution, mkt)
+        if result:
+            print(f"🧬 Evolution triggered: {result}")
+        else:
+            print(f"✅ Resolution recorded: {ticker} = {resolution}")
+
+    elif args.cmd == "learn":
+        if getattr(args, "status", False):
+            print(learning.format_learning_report())
+        elif getattr(args, "evolve", False):
+            result = learning.run_evolution_cycle()
+            print(f"🧬 Evolution: {result}")
+        else:
+            print(learning.format_learning_report())
+
     elif args.cmd == "run":
         if args.daemon:
             stop = Event()
             for sig in (signal.SIGINT, signal.SIGTERM):
                 signal.signal(sig, lambda *_: stop.set())
-            daemon_loop(state, stop)
+            daemon_loop(state, stop, learning=learning)
         else:
             state.log("=== Scheduler one-shot ===")
-            run_scan(state)
+            run_scan(state, learning=learning)
 
     else:
         parser.print_help()

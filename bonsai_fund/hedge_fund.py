@@ -84,7 +84,11 @@ def true_edge_yes(vote: str, raw_edge: float, market_prob: float) -> float:
     return raw_edge if vote == "YES" else -raw_edge
 
 
-def collect_votes(market: Market) -> list[AgentVote]:
+def collect_votes(market: Market, learning=None) -> list[AgentVote]:
+    """
+    Collect votes from all 7 agents. If `learning` (LearningOrchestrator)
+    is provided, use evolved system prompts and apply context-sensitive weighting.
+    """
     votes, primary = [], []
 
     def final_context(pv):
@@ -93,9 +97,16 @@ def collect_votes(market: Market) -> list[AgentVote]:
             for v in pv
         )
 
+    def _prompt(i):
+        if learning is not None:
+            p = learning.get_prompt_for_agent(i)
+            if p:
+                return p
+        return SYSTEM_PROMPTS.get(i, SYSTEM_PROMPTS[0])
+
     with ThreadPoolExecutor(max_workers=6) as ex:
         futures = {
-            ex.submit(call_bonsai, PORT_BASE + i, SYSTEM_PROMPTS[i], build_user_prompt(i, market)): i
+            ex.submit(call_bonsai, PORT_BASE + i, _prompt(i), build_user_prompt(i, market)): i
             for i in range(6)
         }
         for fut in as_completed(futures):
@@ -106,7 +117,7 @@ def collect_votes(market: Market) -> list[AgentVote]:
 
     # FinalVote (agent 6) — gets full context of agents 0-5
     ctx = final_context(primary)
-    sys6 = SYSTEM_PROMPTS[6].replace(
+    sys6 = _prompt(6).replace(
         "Other votes received:\n- FastIntuit: YES, conf=0.80\n...",
         f"Other votes received:\n{ctx}"
     )
@@ -146,13 +157,28 @@ class Signal:
 
 
 def analyze(market: Market, votes: list[AgentVote],
-            portfolio: Portfolio, risk: RiskEngine) -> Signal:
+            portfolio: Portfolio, risk: RiskEngine,
+            weighted_votes: list[tuple] = None) -> Signal:
+    """
+    weighted_votes: [(AgentVote, weight), ...] from LearningOrchestrator.get_weighted_votes().
+    When provided, confidence and edge are scaled by the agent's contextual weight.
+    """
     yes_v = [v for v in votes if v.vote == "YES"]
     no_v  = [v for v in votes if v.vote == "NO"]
 
-    avg_conf = sum(v.confidence for v in votes) / len(votes) if votes else 0.5
-    yd_edges = [true_edge_yes(v.vote, v.edge, market.implied_prob_yes) * v.confidence for v in votes]
-    avg_edge = sum(yd_edges) / len(yd_edges) if yd_edges else 0.0
+    # Apply context-sensitive weights if available
+    if weighted_votes:
+        w_votes = [(v, w) for v, w in weighted_votes]
+        total_w = sum(w for _, w in w_votes)
+        avg_conf = sum(v.confidence * w for v, w in w_votes) / total_w if total_w else 0.5
+        yd_edges = [true_edge_yes(v.vote, v.edge, market.implied_prob_yes) * v.confidence * w
+                    for v, w in w_votes]
+        avg_edge = sum(yd_edges) / total_w if total_w else 0.0
+    else:
+        avg_conf = sum(v.confidence for v in votes) / len(votes) if votes else 0.5
+        yd_edges = [true_edge_yes(v.vote, v.edge, market.implied_prob_yes) * v.confidence for v in votes]
+        avg_edge = sum(yd_edges) / len(yd_edges) if yd_edges else 0.0
+
     est_prob = min(0.99, max(0.01, market.implied_prob_yes + avg_edge))
     margin = abs(len(yes_v) - len(no_v))
     ci = avg_conf * (margin / 7.0)
@@ -183,6 +209,7 @@ def analyze(market: Market, votes: list[AgentVote],
             "conf": v.confidence, "edge_raw": v.edge,
             "edge_yes": true_edge_yes(v.vote, v.edge, market.implied_prob_yes),
             "reason": v.reason,
+            "weight": next((w for vv, w in weighted_votes), 1.0) if weighted_votes else 1.0,
         } for v in votes],
         wall_time=sum(v.latency_ms for v in votes) / 1000,
     )
@@ -356,18 +383,41 @@ def print_status(portfolio: Portfolio, risk: RiskEngine):
 # Commands
 # ---------------------------------------------------------------------------
 
-def cmd_scan(portfolio: Portfolio, risk: RiskEngine, reporter: Reporter, use_api: bool = True):
+def cmd_scan(portfolio: Portfolio, risk: RiskEngine, reporter: Reporter,
+             use_api: bool = True, learning=None):
+    """
+    Full scan loop with recursive self-learning wired in.
+    learning: LearningOrchestrator instance (enables evolved prompts + context weights).
+    """
     print(f"\n{'='*60}\n  BONSAI FUND — MARKET SCAN  [{datetime.now(timezone.utc).strftime('%H:%M UTC')}]\n{'='*60}")
+
+    # If learning is enabled, print generation info
+    if learning:
+        gen = learning.evolver._generation
+        total_trades = learning.outcome_tracker.get_total_edge_analysis()["total_trades"]
+        print(f"  🧠 Learning: Gen {gen} | {total_trades} trades in memory")
+
     markets = fetch_markets(limit=30) if use_api else sample_markets()
     if not markets or len(markets) <= 1:
         print("API unavailable — using sample markets"); markets = sample_markets()
     print(f"\nScanning {len(markets)} markets with 7-agent swarm...\n")
 
-    approved, all_sigs = [], []
+    approved, all_sigs, all_votes = [], [], []
 
     for mkt in markets:
-        votes = collect_votes(mkt)
-        sig = analyze(mkt, votes, portfolio, risk)
+        # Collect votes — uses evolved prompts if learning is active
+        votes = collect_votes(mkt, learning=learning)
+        all_votes.append(votes)
+
+        # Apply context-sensitive weights if learning is active
+        if learning:
+            weighted = learning.get_weighted_votes(
+                votes, mkt, mkt.days_to_event
+            )
+            sig = analyze(mkt, votes, portfolio, risk, weighted_votes=weighted)
+        else:
+            sig = analyze(mkt, votes, portfolio, risk)
+
         all_sigs.append(sig)
         print_signal(sig)
         if sig.approved:
@@ -377,9 +427,20 @@ def cmd_scan(portfolio: Portfolio, risk: RiskEngine, reporter: Reporter, use_api
                 portfolio.open_position(mkt.ticker, side, sig.contracts, price, voted_by="bonsai_swarm")
                 print(f"  📝 PAPER: Opened {side} x{sig.contracts} @ {price:.0f}¢")
 
+    # SHORT-TERM LEARNING: Record scan votes for context-sensitive weighting
+    if learning and all_votes:
+        learning.record_scan_votes(markets, all_votes, portfolio)
+
     portfolio.record_equity()
     print(f"\n{'='*60}\n  SCAN SUMMARY  [{datetime.now(timezone.utc).strftime('%H:%M UTC')}]\n{'='*60}")
     print(f"  Markets: {len(markets)}  Approved: {len(approved)}  Bankroll: ${portfolio.bankroll:.4f}")
+
+    # Print learning status if active
+    if learning:
+        total = learning.outcome_tracker.get_total_edge_analysis()
+        print(f"  🧠 Learning edge captured: {total.get('avg_edge', 0):+.4f} "
+              f"({total.get('total_trades', 0)} trades)")
+
     if approved:
         print(f"\n  APPROVED:")
         for mkt, sig in approved:
@@ -410,10 +471,19 @@ def main():
     parser = argparse.ArgumentParser(description="Bonsai Hedge Fund")
     sub = parser.add_subparsers(dest="cmd")
     sub.add_parser("status")
-    sub.add_parser("scan")
+    scan_parser = sub.add_parser("scan")
+    scan_parser.add_argument("--learn", action="store_true",
+                             help="Enable recursive self-learning for this scan")
+    scan_parser.add_argument("--no-api", action="store_true", help="Use sample markets (no API)")
     board = sub.add_parser("board-report")
     cb    = sub.add_parser("circuit-break")
     rst   = sub.add_parser("reset-portfolio")
+    learn = sub.add_parser("learn")
+    learn.add_argument("--status", action="store_true", help="Show learning status")
+    learn.add_argument("--evolve", action="store_true", help="Force evolution cycle now")
+    res   = sub.add_parser("resolve")
+    res.add_argument("ticker")
+    res.add_argument("resolution")   # YES or NO
     vote  = sub.add_parser("vote"); vote.add_argument("ticker")
     args = parser.parse_args()
 
@@ -421,10 +491,17 @@ def main():
     risk      = RiskEngine(portfolio, RiskLimits())
     reporter  = Reporter(portfolio, risk)
 
+    # Learning orchestrator (lazily initialized)
+    learning = None
+    if getattr(args, "learn", False) or getattr(args, "cmd", None) == "learn":
+        from bonsai_fund.self_learning.orchestrator import LearningOrchestrator
+        learning = LearningOrchestrator()
+
     if args.cmd == "status":
         print_status(portfolio, risk)
     elif args.cmd == "scan":
-        cmd_scan(portfolio, risk, reporter, use_api=False)
+        use_api = not getattr(args, "no_api", False)
+        cmd_scan(portfolio, risk, reporter, use_api=use_api, learning=learning)
     elif args.cmd == "board-report":
         cmd_board_report(portfolio, risk, reporter)
     elif args.cmd == "circuit-break":
@@ -433,6 +510,31 @@ def main():
     elif args.cmd == "reset-portfolio":
         portfolio.reset_to_cash()
         print("✅ All positions liquidated at market price.")
+    elif args.cmd == "learn":
+        if getattr(args, "status", False):
+            print(learning.format_learning_report())
+        elif getattr(args, "evolve", False):
+            result = learning.run_evolution_cycle()
+            print(f"🧬 Evolution: {result}")
+        else:
+            # Show learning status by default
+            print(learning.format_learning_report())
+    elif args.cmd == "resolve":
+        # MEDIUM-TERM LEARNING: feed a market resolution back into the learning pipeline
+        from bonsai_fund.self_learning.orchestrator import LearningOrchestrator
+        learning = LearningOrchestrator()
+        ticker = args.ticker.upper()
+        resolution = args.resolution.upper()
+        # Find the market in sample or fetch from API
+        markets = sample_markets()
+        mkt = next((m for m in markets if m.ticker == ticker), None)
+        if not mkt:
+            print(f"Unknown ticker: {ticker}"); return
+        result = learning.process_resolution(ticker, resolution, mkt)
+        if result:
+            print(f"🧬 Evolution triggered: {result}")
+        else:
+            print(f"✅ Resolution recorded: {ticker} = {resolution}")
     elif args.cmd == "vote":
         markets = {m.ticker: m for m in sample_markets()}
         if args.ticker not in markets:

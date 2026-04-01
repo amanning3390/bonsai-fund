@@ -301,6 +301,144 @@ hermes skills install bonsai-fund
   --prompt "Run: cd ~/.hermes/skills/bonsai-fund && python3 bonsai_fund/scheduler.py board-report"
 ```
 
+## Recursive Self-Learning System
+
+Bonsai Fund implements a **three-time-scale recursive learning loop** that compounds knowledge
+across trades, just as capital compounds across returns.
+
+### Architecture
+
+```
+bonsai_fund/self_learning/
+├── outcome_tracker.py   — SHORT-TERM: records every trade outcome
+├── agent_memory.py       — MEDIUM-TERM: per-agent, per-category weights
+├── market_classifier.py  — MEDIUM-TERM: category base rates + analogical priors
+├── evolver.py           — LONG-TERM: evolutionary prompt mutation
+└── orchestrator.py      — Ties all three loops together
+```
+
+### The Three Learning Loops
+
+#### SHORT-TERM (every scan cycle)
+
+Every time the swarm votes on a market, those votes are stored in `AgentMemory` tagged with:
+- Market category (Geopolitics, NBA, CPI, etc.)
+- Price bin (0-20c, 20-40c, ..., 80-100c)
+- Time horizon (short <14d, medium 14-60d, long >60d)
+
+On the **next** scan, when a similar market comes up, agents that have historically
+performed well in that category/price/horizon get **up-weighted** by up to 2x.
+Agents with poor track records in that context get **down-weighted** to 0.5x.
+
+```
+Example: A CPI market at 28c, 14 days out
+  → FastIntuit has been right on CPI 12/15 times  → weight = 1.3x
+  → DeepAnalyst has been wrong on CPI 4/8 times   → weight = 0.7x
+  → BayesianUpdater has been right on CPI 9/10 times → weight = 1.4x
+Weighted confidence: (0.75×1.3 + 0.70×0.7 + 0.65×1.4) / (1.3+0.7+1.4) = ...
+```
+
+#### MEDIUM-TERM (after every market resolution)
+
+When a market resolves (YES or NO), `OutcomeTracker` records the result and:
+1. Updates each agent's accuracy score for that category/price/horizon
+2. Updates the category's base rate (e.g., Geopolitics YES base rate = 38%)
+3. Refines `MarketClassifier` agent affinities — which agents should be trusted more
+   in each category going forward
+
+#### LONG-TERM (every 100+ new trades)
+
+`EvolutionaryMutator` runs a full evolution cycle:
+
+1. **Evaluate**: Score all active agent prompt variants by win rate + edge + sample size
+2. **Select**: Keep top 2 performers as champions; discard worst performers
+3. **Mutate**: Create 2-3 new prompt variants from the champions using **guided mutations**
+
+**Mutation operators** (guided by performance data):
+| Operator | When Applied |
+|----------|-------------|
+| `strengthen_bayesian` | BayesianUpdater wins on CPI/Economics markets |
+| `strengthen_contrarian` | Contrarian wins on high-volume Geopolitics |
+| `strengthen_macro` | MacroIntegrator correctly called regime shifts |
+| `strengthen_forensic` | ForensicReader found hidden anomalies in Earnings |
+| `weaken_veto` | FinalVote is vetoing too many valid signals |
+| `add_calibration_note` | Agent has poor calibration (predicted conf ≠ actual win rate) |
+| `add_time_horizon_sensitivity` | Agent performs differently on short vs long markets |
+
+**Lineage tracking**: Every evolved prompt variant carries its full lineage:
+```
+Generation 2 agent 2 (hash=a7f3c1)
+  parent: Generation 1 agent 2 (hash=b2e8d4) — strengthen_bayesian
+    parent: Generation 0 agent 2 (hash=seed) — original BayesianUpdater
+```
+
+### Commands
+
+```bash
+# Run a scan with self-learning enabled
+python3 bonsai_fund/hedge_fund.py scan --learn
+
+# Check learning status
+python3 bonsai_fund/hedge_fund.py learn --status
+python3 bonsai_fund/scheduler.py learn --status
+
+# Force an evolution cycle (normally triggers automatically at 100+ trades)
+python3 bonsai_fund/hedge_fund.py learn --evolve
+
+# Record a market resolution (feeds into learning)
+python3 bonsai_fund/hedge_fund.py resolve KXNBA-26 YES
+python3 bonsai_fund/scheduler.py resolve KXCPICPI-26MAR NO
+```
+
+### Example: How Learning Compounds
+
+```
+TRADE 1:   FastIntuit → YES on Geopolitics @ 75c → WRONG (Putin event)
+           AgentMemory: FastIntuit/Geopolitics -1 correct
+           
+TRADE 47:  FastIntuit votes YES on Geopolitics again
+           Context weight for Geopolitics = 0.9x (penalized from Trade 1)
+           Swarm adjusts: if other agents agree strongly, signal still fires
+           
+TRADE 112: BayesianUpdater outperforms FastIntuit on Geopolitics 8/10 vs 4/8
+           → BayesianUpdater gets 1.3x weight on Geopolitics
+           → FastIntuit gets 0.8x weight on Geopolitics
+           
+TRADE 200+: Evolution triggers. FastIntuit's prompt gets a mutation:
+           "Important: your gut calibration on Geopolitics has been poor.
+            Your confidence on Geopolitics should be reduced by 10-15%."
+           
+TRADE 350: New FastIntuit variant outperforms original: 62% vs 55% on Geopolitics
+           → New prompt becomes the champion
+           → Original is archived in lineage
+```
+
+### Data Stored by the Learning System
+
+| Data | Location |
+|------|----------|
+| Trade outcomes + per-agent attribution | `bonsai_fund_data/outcomes.db` |
+| Agent vote history + context tags | `bonsai_fund_data/agent_memory.db` |
+| Category base rates + agent affinities | `bonsai_fund_data/market_classifier.db` |
+| Evolved prompt variants + lineage | `bonsai_fund_data/evolver.db` |
+| Learning events log | `bonsai_fund_data/learning_events.jsonl` |
+
+### Seed Categories
+
+The classifier starts with informed priors (refined automatically after first trades):
+
+| Category | Base Rate | Description |
+|----------|-----------|-------------|
+| Geopolitics | 38% YES | Wars, sanctions, diplomatic events |
+| NBA / NFL | 50% | Sports championships |
+| Earnings | 52% | EPS beat/miss |
+| Jobs | 50% | NFP, unemployment |
+| CPI | 40% | Inflation readings |
+| Hurricane | 40% | Landfall events |
+| Elections | 48% | Political outcomes |
+| Interest Rates | 45% | Fed decisions |
+| Crypto | 45% | BTC, ETH events |
+
 ## Architecture Decisions
 
 - **Why 7 agents?** Odd number prevents ties. 7 is the minimum for meaningful cognitive diversity
