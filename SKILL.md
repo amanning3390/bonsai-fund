@@ -439,6 +439,143 @@ The classifier starts with informed priors (refined automatically after first tr
 | Interest Rates | 45% | Fed decisions |
 | Crypto | 45% | BTC, ETH events |
 
+## Staged Drawdown System
+
+Replaces the binary circuit breaker with 6 severity tiers. Each tier progressively:
+- Reduces position sizing
+- Raises vote confidence thresholds
+- Mandates a training/improvement action before resuming
+
+| Stage | DD Range | Position Size | Min Conf | Min Margin | Training Required |
+|-------|----------|--------------|----------|------------|-------------------|
+| 🟢 GREEN | 0-10% | 100% (5%) | 55% | 2 | None |
+| 🟡 YELLOW | 10-15% | 50% (2.5%) | 60% (+5pp) | 3 | None |
+| 🟠 ORANGE | 15-20% | 25% (1.25%) | 65% (+10pp) | 4 | ANALYSIS |
+| 🔴 RED | 20-25% | 10% (0.5%) | 70% (+15pp) | 4 | SIMULATION |
+| 🚨 CRITICAL | 25-35% | 0% (halt) | — | — | EVOLUTION |
+| ❄️ FROZEN | 35%+ | 0% (halt) | — | — | DEEP_RESET |
+
+**How it works:**
+1. `StagedDrawdownMonitor` tracks peak and current bankroll continuously
+2. On every scan, `check()` compares drawdown against tier boundaries
+3. If tier requires training (ORANGE+), `DrawdownResponseOrchestrator` fires the appropriate action
+4. Trading is blocked until the training completes and `mark_improvement_done()` is called
+5. After training, stage limits relax but don't fully reset — the system stays cautious
+
+**The insight:** A 15% drawdown means the swarm is wrong about something specific.
+Rather than just stopping, the system learns WHY and fixes it before resuming.
+
+## Simulation Engine (`simulation.py`)
+
+Replay-based agent training using historical + synthetic market data.
+**All trading generates learning data. All learning improves trading.**
+
+### Simulation Modes
+
+| Mode | When | Purpose |
+|------|------|---------|
+| `replay` | Manual | Re-run recent losing trades with agent substitutions |
+| `synthetic` | Baseline (every 50 scans) | Diverse markets across all categories |
+| `adversarial` | Drawdown ORANGE+ | Markets in weak categories at extreme prices |
+| `candidate` | Evolution | Test evolved prompt variants against originals |
+
+### Synthetic Market Generator
+
+Generates realistic markets using templates per category:
+- **Geopolitics:** Putin, sanctions, Iran nuclear, war escalation
+- **NBA/NFL:** Championship winners, playoff teams, MVP
+- **CPI/Jobs:** Inflation readings, NFP, unemployment
+- **Earnings:** EPS beat/miss for major companies
+- **Elections:** Candidate wins, party control
+- **Crypto:** BTC/ETH price targets, ETF decisions
+- **Hurricane:** Landfall, named storm counts
+
+Ground truth is set to be slightly against crowded directions (regression to mean),
+creating realistic losses for the swarm to learn from.
+
+### Simulation Pipeline
+
+```
+1. Generate synthetic markets (adversarial + diverse)
+2. Run agents with ORIGINAL prompts → record votes
+3. Run agents with CANDIDATE prompts (evolved) → record votes
+4. Score: candidate_win_rate vs original_win_rate
+5. If candidate wins by >5% on 10+ trades → DEPLOY
+   Else → keep original, log the failure
+```
+
+## News Pipeline (`news_pipeline.py`)
+
+Monitors RSS feeds for market-relevant news and injects context into agent prompts
+before each scan. **The swarm doesn't trade blind.**
+
+### Sources
+
+| Category | Feeds |
+|----------|-------|
+| Geopolitics | BBC World, NYT Politics |
+| Economics | BBC Business, NYT Economy, FT |
+| Earnings | BBC Business |
+| Sports | ESPN |
+| Crypto | CoinTelegraph, Decrypt |
+| Weather | NOAA RSS |
+
+### Context Injection
+
+Before each market scan:
+1. Fetch latest headlines for that market's categories
+2. Score relevance (keyword matching + ticker hints)
+3. Assemble `MarketContext` with sentiment tags (risk-off, inflation-fear, etc.)
+4. Prepend to agent system prompts: `bonsai_fund/news_pipeline.py` wraps prompts
+
+```python
+# In the scan loop:
+from bonsai_fund.news_pipeline import NewsPipeline
+news = NewsPipeline()
+for mkt in markets:
+    ctx = news.get_context_for_market(mkt)
+    enhanced_prompt = news.prepend_to_prompt(base_system_prompt, mkt)
+    # ... vote with enhanced prompt
+```
+
+### Economic Calendar
+
+Seed dates for known events: FOMC meetings, NFP (first Friday), CPI releases.
+Calendar events appear in the composite context injected into agent prompts.
+
+## Drawdown Response Orchestrator (`drawdown_response.py`)
+
+The executive layer that maps drawdown stage → training action.
+Runs training in background threads so the scheduler never blocks.
+
+### Severity → Action Mapping
+
+| Stage | Training Action | What Happens |
+|-------|----------------|--------------|
+| 🟢 GREEN | None | Normal scanning |
+| 🟡 YELLOW | None | Passive monitoring, reduced sizing |
+| 🟠 ORANGE | `analyze` | Background analysis of recent losing trades; identifies weak categories; fetches relevant news |
+| 🔴 RED | `simulate` | Full adversarial simulation against weak categories; triggers evolution if candidate wins |
+| 🚨 CRITICAL | `evolve` | Full evolution cycle; all trading halted |
+| ❄️ FROZEN | `deep_reset` | Archive positions; load Gen 0 best prompts; manual review required |
+
+### Non-Blocking Design
+
+```
+Scheduler scan cycle:
+  1. orchestrator.check() → blocked? (training running?)
+  2. If training needed → fire in background thread
+  3. Continue scan (trading blocked by RiskEngine)
+  4. On completion → mark_improvement_done() → RiskEngine re-enables trading
+```
+
+### Database Tables
+
+| Table | Purpose |
+|-------|---------|
+| `response_actions` | Every training action fired |
+| `drawdown_log` | Stage transitions with timestamps |
+
 ## Architecture Decisions
 
 - **Why 7 agents?** Odd number prevents ties. 7 is the minimum for meaningful cognitive diversity

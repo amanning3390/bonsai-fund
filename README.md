@@ -83,10 +83,13 @@ All agents run **locally** — no API key, no cloud dependency, no per-token cos
 
 - **7 cognitive agents** with distinct thinking styles, all running on Bonsai-8B GGUF locally
 - **Kelly criterion** sizing — mathematically optimal position sizing for repeated bets
-- **Circuit breaker** — 25% drawdown halt, manual reset required
+- **Staged drawdown** — 6-tier severity system (GREEN → YELLOW → ORANGE → RED → CRITICAL → FROZEN), each with progressive sizing reduction and mandatory training
+- **Simulation engine** — adversarial + synthetic market replay; all trading generates training data
+- **News pipeline** — RSS monitors inject live context into prompts before each scan; economic calendar included
+- **Drawdown response orchestrator** — fires ANALYSIS / SIMULATION / EVOLUTION based on severity; non-blocking background threads
+- **Recursive self-learning** — 3 time-scale compounding: context weights (short), base rates (medium), prompt evolution (long)
 - **SQLite portfolio** — position tracking, realized/unrealized P&L, equity curve
 - **Board Reports** — Sunday 8am Telegram digest for stakeholders
-- **Strategy plugins** — drop in new signal generators without touching core code
 - **Hermes-native** — `/bonsai` slash commands, cron integration, skill install
 
 ## Quick Start
